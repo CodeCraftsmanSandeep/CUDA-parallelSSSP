@@ -136,186 +136,186 @@ public:
     }
 };
 
-    /* Kernel to
-        ~> Insert batch of edges into existing graph */
-    __global__ void insertBatchOfEdgesKernel(
-            const int                           numNodes,
-            const int* __restrict__             batchDestinationVertices,
-            const long long int* __restrict__   batchWeights,
-            const int* __restrict__             batchPos,
-            int* __restrict__                   adjListSizes,
-            int* __restrict__                   adjListCapacities,
-            int** __restrict__                  adjListDestinationVertices,
-            long long int** __restrict__        adjListWeights,
-            bool* __restrict__                  relaxed,
-            bool* __restrict__                  nextFlag, 
-            long long int* __restrict__         dist)
+/* Kernel to
+    ~> Insert batch of edges into existing graph */
+__global__ void insertBatchOfEdgesKernel(
+        const int                           numNodes,
+        const int* __restrict__             batchDestinationVertices,
+        const long long int* __restrict__   batchWeights,
+        const int* __restrict__             batchPos,
+        int* __restrict__                   adjListSizes,
+        int* __restrict__                   adjListCapacities,
+        int** __restrict__                  adjListDestinationVertices,
+        long long int** __restrict__        adjListWeights,
+        bool* __restrict__                  relaxed,
+        bool* __restrict__                  nextFlag, 
+        long long int* __restrict__         dist)
+{
+    int u = threadIdx.y + blockIdx.x * blockDim.y;
+    int v;
+    long long int distCandidate, w;
+    while(__builtin_expect(u < numNodes, 1))
     {
-        int u = threadIdx.y + blockIdx.x * blockDim.y;
-        int v;
-        long long int distCandidate, w;
-        while(__builtin_expect(u < numNodes, 1))
+        const int start     = batchPos[u];
+        const int end       = batchPos[u+1];
+        const int reqSpace  = end-start;
+        const int oldSize   = adjListSizes[u];
+        const int newSize   = oldSize + reqSpace;
+
+        if(newSize > adjListCapacities[u])
         {
-            const int start     = batchPos[u];
-            const int end       = batchPos[u+1];
-            const int reqSpace  = end-start;
-            const int oldSize   = adjListSizes[u];
-            const int newSize   = oldSize + reqSpace;
+            int* newStorageForDestinationVertices;
+            long long int* newStorageForWeights;
+            const int newCapacity = (newSize << 1);
 
-            if(newSize > adjListCapacities[u])
+            if(threadIdx.x == 0)
             {
-                int* newStorageForDestinationVertices;
-                long long int* newStorageForWeights;
-                const int newCapacity = (newSize << 1);
+                // insert space in the adjacency list of vertex
+                newStorageForDestinationVertices = (int*)malloc(newCapacity * sizeof(int));
+                newStorageForWeights = (long long int*)malloc(newCapacity * sizeof(long long int));
+            }
+            
+            // No __syncwarp() Needed because: __shfl_sync inherently synchronizes warp
+            // Broadcast the pointer from lane 0 to all lanes in the warp
+            newStorageForDestinationVertices = (int*)__shfl_sync(0xFFFFFFFF, (uintptr_t)newStorageForDestinationVertices, 0);
+            newStorageForWeights = (long long int*)__shfl_sync(0xFFFFFFFF, (uintptr_t)newStorageForWeights, 0);
 
-                if(threadIdx.x == 0)
-                {
-                    // insert space in the adjacency list of vertex
-                    newStorageForDestinationVertices = (int*)malloc(newCapacity * sizeof(int));
-                    newStorageForWeights = (long long int*)malloc(newCapacity * sizeof(long long int));
-                }
+            // Copy the previosuly present out neighbours to new storage
+            int iter = threadIdx.x;
+            while(iter < adjListSizes[u])
+            {
+                newStorageForDestinationVertices[iter] = adjListDestinationVertices[u][iter];
+                newStorageForWeights[iter] = adjListWeights[u][iter];
+
+                iter += 32;
+            }
+            __syncwarp();  // Needed because: ensuring copying is completed by threads in warp before freeing the memory
+
+            if(threadIdx.x == 0)
+            {
+                free(adjListDestinationVertices[u]);
+                free(adjListWeights[u]);
+
+                adjListDestinationVertices[u] = newStorageForDestinationVertices;
+                adjListWeights[u] = newStorageForWeights;
                 
-                // No __syncwarp() Needed because: __shfl_sync inherently synchronizes warp
-                // Broadcast the pointer from lane 0 to all lanes in the warp
-                newStorageForDestinationVertices = (int*)__shfl_sync(0xFFFFFFFF, (uintptr_t)newStorageForDestinationVertices, 0);
-                newStorageForWeights = (long long int*)__shfl_sync(0xFFFFFFFF, (uintptr_t)newStorageForWeights, 0);
-
-                // Copy the previosuly present out neighbours to new storage
-                int iter = threadIdx.x;
-                while(iter < adjListSizes[u])
-                {
-                    newStorageForDestinationVertices[iter] = adjListDestinationVertices[u][iter];
-                    newStorageForWeights[iter] = adjListWeights[u][iter];
-
-                    iter += 32;
-                }
-                __syncwarp();  // Needed because: ensuring copying is completed by threads in warp before freeing the memory
-
-                if(threadIdx.x == 0)
-                {
-                    free(adjListDestinationVertices[u]);
-                    free(adjListWeights[u]);
-
-                    adjListDestinationVertices[u] = newStorageForDestinationVertices;
-                    adjListWeights[u] = newStorageForWeights;
-                    
-                    adjListSizes[u] = newSize;
-                    adjListCapacities[u] = newCapacity;
-                }
-            }else if(threadIdx.x == 0)
-            {
                 adjListSizes[u] = newSize;
+                adjListCapacities[u] = newCapacity;
             }
-            __syncwarp();  // Needed because: ensuring new pointers are copied before adding new edges
-
-            int adjListIter = oldSize + threadIdx.x;
-            int batchIter = start + threadIdx.x;
-            while(batchIter < end)
-            {
-                v = adjListDestinationVertices[u][adjListIter] = batchDestinationVertices[batchIter];
-                w = adjListWeights[u][adjListIter] = batchWeights[batchIter];
-
-                if(dist[u] != LLONG_MAX){
-                    distCandidate = dist[u] + w;
-                    if(distCandidate < dist[v])
-                    {
-                        atomicMin(&dist[v], distCandidate);
-                        *relaxed = true;
-                        nextFlag[v] = true;
-                    }
-                }
-                // warp-size: which is blockDim.x
-                batchIter   += 32; 
-                adjListIter += 32; 
-            }
-
-            u += blockDim.y * gridDim.x;
-        }
-    }
-
-    /* Kernel
-        ~> which relaxes edges in parallel */
-    __global__ void relaxEdges(
-            const int                           numNodes,
-            const int* __restrict__             adjListSizes,
-            int** __restrict__            adjListDestinationVertices,
-            long long int** __restrict__  adjListWeights,
-            bool* __restrict__                  currFlag,
-            bool* __restrict__                  nextFlag,
-            long long int* __restrict__         dist,
-            bool* __restrict__                  relaxed)
-    {
-        int u = threadIdx.y + blockIdx.x * blockDim.y;
-
-        int v;
-        long long int distCandidate, w;
-        while(__builtin_expect(u < numNodes, 1))
+        }else if(threadIdx.x == 0)
         {
-            if(currFlag[u])
-            {
-                __syncwarp();
-                currFlag[u] = false;
+            adjListSizes[u] = newSize;
+        }
+        __syncwarp();  // Needed because: ensuring new pointers are copied before adding new edges
 
-                int outEdge = threadIdx.x;
-                while(outEdge < adjListSizes[u])
+        int adjListIter = oldSize + threadIdx.x;
+        int batchIter = start + threadIdx.x;
+        while(batchIter < end)
+        {
+            v = adjListDestinationVertices[u][adjListIter] = batchDestinationVertices[batchIter];
+            w = adjListWeights[u][adjListIter] = batchWeights[batchIter];
+
+            if(dist[u] != LLONG_MAX){
+                distCandidate = dist[u] + w;
+                if(distCandidate < dist[v])
                 {
-                    v = adjListDestinationVertices[u][outEdge];
-                    w = adjListWeights[u][outEdge];
-
-                    distCandidate = dist[u] + w;
-                    if(distCandidate < dist[v])
-                    {
-                        atomicMin(&dist[v], distCandidate); // L2 cache is coherent for atomics, so no cache coherence problem
-                        nextFlag[v] = true;
-                        *relaxed = true;
-                    }
-                    outEdge += 32; // warp-size which is blockDim.x here
+                    atomicMin(&dist[v], distCandidate);
+                    *relaxed = true;
+                    nextFlag[v] = true;
                 }
             }
-            u += blockDim.y * gridDim.x;
+            // warp-size: which is blockDim.x
+            batchIter   += 32; 
+            adjListIter += 32; 
         }
-    }
 
-    /* Kernel to
-        ~> set distance of every vectex LLONG_MAX */
-    __global__ void initializeDistanceValues(
-            const int                   numNodes,
-            long long int* __restrict__ dist)
+        u += blockDim.y * gridDim.x;
+    }
+}
+
+/* Kernel
+    ~> which relaxes edges in parallel */
+__global__ void relaxEdges(
+        const int                           numNodes,
+        const int* __restrict__             adjListSizes,
+        int** __restrict__            adjListDestinationVertices,
+        long long int** __restrict__  adjListWeights,
+        bool* __restrict__                  currFlag,
+        bool* __restrict__                  nextFlag,
+        long long int* __restrict__         dist,
+        bool* __restrict__                  relaxed)
+{
+    int u = threadIdx.y + blockIdx.x * blockDim.y;
+
+    int v;
+    long long int distCandidate, w;
+    while(__builtin_expect(u < numNodes, 1))
     {
-        int u = threadIdx.x + blockIdx.x * blockDim.x;
-        while(__builtin_expect(u < numNodes, 1))
+        if(currFlag[u])
         {
-            dist[u] = LLONG_MAX;
-            u += blockDim.x * gridDim.x;
-        }
-    }
+            __syncwarp();
+            currFlag[u] = false;
 
-    /* Kernel to
-        ~> set distance of source vertex to 0
-        ~> negative cycle to false */
-    __global__ void initializeGraphSitutaion(
-            bool* __restrict__          negCycle,
-            long long int* __restrict__ dist,
-            const int                   sourceVertex)
-    {
-        *negCycle = false;
-        dist[sourceVertex] = 0;
-    }
+            int outEdge = threadIdx.x;
+            while(outEdge < adjListSizes[u])
+            {
+                v = adjListDestinationVertices[u][outEdge];
+                w = adjListWeights[u][outEdge];
 
-    /* Kernel to
-        ~> to find start and end positions to insert edges in batch */
-    __global__ void computeIndices(
-            int* __restrict__ batchOutDegree,
-            const int* __restrict__ sourceVertices,
-            const int batchSize)
-    {
-        int index = threadIdx.x + blockIdx.x * blockDim.x;
-        while(__builtin_expect(index < batchSize, 1))
-        {
-            atomicInc((unsigned int*)&batchOutDegree[sourceVertices[index]], UINT_MAX);
-            index += blockDim.x * gridDim.x;
+                distCandidate = dist[u] + w;
+                if(distCandidate < dist[v])
+                {
+                    atomicMin(&dist[v], distCandidate); // L2 cache is coherent for atomics, so no cache coherence problem
+                    nextFlag[v] = true;
+                    *relaxed = true;
+                }
+                outEdge += 32; // warp-size which is blockDim.x here
+            }
         }
+        u += blockDim.y * gridDim.x;
     }
+}
+
+/* Kernel to
+    ~> set distance of every vectex LLONG_MAX */
+__global__ void initializeDistanceValues(
+        const int                   numNodes,
+        long long int* __restrict__ dist)
+{
+    int u = threadIdx.x + blockIdx.x * blockDim.x;
+    while(__builtin_expect(u < numNodes, 1))
+    {
+        dist[u] = LLONG_MAX;
+        u += blockDim.x * gridDim.x;
+    }
+}
+
+/* Kernel to
+    ~> set distance of source vertex to 0
+    ~> negative cycle to false */
+__global__ void initializeGraphSitutaion(
+        bool* __restrict__          negCycle,
+        long long int* __restrict__ dist,
+        const int                   sourceVertex)
+{
+    *negCycle = false;
+    dist[sourceVertex] = 0;
+}
+
+/* Kernel to
+    ~> to find start and end positions to insert edges in batch */
+__global__ void computeIndices(
+        int* __restrict__ batchOutDegree,
+        const int* __restrict__ sourceVertices,
+        const int batchSize)
+{
+    int index = threadIdx.x + blockIdx.x * blockDim.x;
+    while(__builtin_expect(index < batchSize, 1))
+    {
+        atomicInc((unsigned int*)&batchOutDegree[sourceVertices[index]], UINT_MAX);
+        index += blockDim.x * gridDim.x;
+    }
+}
 
 
 /*
