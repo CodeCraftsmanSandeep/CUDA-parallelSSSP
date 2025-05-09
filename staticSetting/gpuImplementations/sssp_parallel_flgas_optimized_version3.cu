@@ -22,6 +22,17 @@ double findStandardDeviation(const std::vector<double> times);
 
 constexpr unsigned int NUM_RUNS = 11;
 
+
+template <typename T>
+void print(T* arr, int size)
+{
+    for(int i = 0; i < size; i++)
+    {
+        printf("%d ", arr[i]);
+    }
+    printf("\n");
+  }
+
 void SSSP(
       const int numNodes,
       const int numEdges,
@@ -40,6 +51,7 @@ void solve(int numNodes, int numEdges, Edge* edgeList, int sourceVertex)
     int* rowPtr = (int*)calloc(numNodes + 1, sizeof(int));
     int* colInd = (int*)malloc(numEdges * sizeof(int));
     long long int* weights = (long long int*)malloc(numEdges * sizeof(long long int));
+    int* currentPos = (int*)calloc(numNodes, sizeof(int)); // Auxillary array to track insertion offset
 
     for(int edge = 0; edge < numEdges; edge++)
     {
@@ -51,11 +63,11 @@ void solve(int numNodes, int numEdges, Edge* edgeList, int sourceVertex)
         rowPtr[u+1] += rowPtr[u];
     }
 
-    int* currentPos = (int*)calloc(numNodes, sizeof(int)); // Auxillary array to track insertion offset
     for(int edge = 0; edge < numEdges; edge++)
     {
-        colInd[rowPtr[edgeList[edge].u] + currentPos[edgeList[edge].u]] = edgeList[edge].v;
-        weights[rowPtr[edgeList[edge].u] + currentPos[edgeList[edge].u]] = edgeList[edge].w;
+        int pos = rowPtr[edgeList[edge].u] + currentPos[edgeList[edge].u];
+        colInd[pos] = edgeList[edge].v;
+        weights[pos] = edgeList[edge].w;
         currentPos[edgeList[edge].u]++;
     }
 
@@ -218,7 +230,7 @@ void SSSP(
     bool relaxed = true;
 
     dim3 blockSize(32 * 4, 1); // 4 warps are alloted to each vertex (a block handles each vertex)
-    dim3 gridSize(512, 1);    // using 68 * 12 is not useful because of non-alignment access of memory.
+    dim3 gridSize(1024, 1);    // using 68 * 12 is not useful because of non-alignment access of memory.
 
     // Iterating atMost |V| times (the |V|th iteration if so happens will be executed to detect negative cycle)
     for(int iter = 1; (iter <= numNodes) && relaxed; iter++)
