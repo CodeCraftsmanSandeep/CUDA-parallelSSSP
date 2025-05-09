@@ -123,7 +123,12 @@ __global__ void initializeDistOfSourceVertex(long long int* __restrict__ dist, c
 }
 
 // Grid stride access
-__global__ void relaxEdges(const unsigned int numEdges, const int* __restrict__ inNeighbour, const int* __restrict__ outNeighbour, const long long int* __restrict__ weight, bool* relaxed, long long int* __restrict__ dist)
+__global__ void relaxEdges(const unsigned int                 numEdges, 
+                           const int* __restrict__            inNeighbour, 
+                           const int* __restrict__            outNeighbour, 
+                           const long long int* __restrict__  weight, 
+                           bool* __restrict__                 relaxed, 
+                           long long int* __restrict__        dist)
 {
     unsigned int e = threadIdx.x + blockIdx.x * blockDim.x;
     int u, v;
