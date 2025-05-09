@@ -166,7 +166,7 @@ __global__ void initializeDistOfSourceVertex(
 
 // relaxed out edges of vertices whoose distance is reduced in the previous iteration
 __global__ void relaxEdges(
-        const int            numNodes,
+        const int                         numNodes,
         const int*           __restrict__ rowPtr, 
         const int*           __restrict__ colInd, 
         const long long int* __restrict__ weights, 
