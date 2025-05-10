@@ -65,7 +65,7 @@ __global__ void initializeAdjList(
     {
         adjListDestinationVertices[u] = (int*)malloc(initialCapacity * sizeof(int));
         adjListWeights[u] = (long long int*)malloc(initialCapacity * sizeof(long long int));
-        adjListCapacities[0] = initialCapacity;
+        adjListCapacities[u] = initialCapacity;
         adjListSizes[u] = 0;
 
         u += gridDim.x * blockDim.x;
@@ -99,7 +99,6 @@ protected:
     int**           d_adjListDestinationVertices;
     long long int** d_adjListWeights;
 
-    // NEED TO SEE USING __device__ for all device pointers, so that argument copying to kernels can be avoided
     // Auxillary data structures to support adjacency list
     int*            d_adjListCapacities;
     int*            d_adjListSizes;
@@ -114,7 +113,7 @@ public:
         cudaMalloc(&d_adjListCapacities, numNodes * sizeof(int));
         cudaMalloc(&d_adjListSizes, numNodes * sizeof(int));
         
-        cudaDeviceSetLimit(cudaLimitMallocHeapSize, (int)(1e8 * 5));
+        cudaDeviceSetLimit(cudaLimitMallocHeapSize, (1e9 * 1LL * sizeof(int)));
         initializeAdjList <<< GRID_SIZE, BLOCK_SIZE >>> (numNodes, d_adjListDestinationVertices, d_adjListWeights, d_adjListCapacities, d_adjListSizes, initialCapacity);
         cudaDeviceSynchronize();
     }
@@ -180,6 +179,11 @@ __global__ void insertBatchOfEdgesKernel(
             newStorageForDestinationVertices = (int*)__shfl_sync(0xFFFFFFFF, (uintptr_t)newStorageForDestinationVertices, 0);
             newStorageForWeights = (long long int*)__shfl_sync(0xFFFFFFFF, (uintptr_t)newStorageForWeights, 0);
 
+            if(newStorageForDestinationVertices == nullptr || newStorageForWeights == nullptr)
+            {
+                printf("Memory allocation failed\n");
+                continue;
+            }
             // Copy the previosuly present out neighbours to new storage
             int iter = threadIdx.x;
             while(iter < adjListSizes[u])
@@ -202,11 +206,12 @@ __global__ void insertBatchOfEdgesKernel(
                 adjListSizes[u] = newSize;
                 adjListCapacities[u] = newCapacity;
             }
-        }else if(threadIdx.x == 0)
+            __syncwarp();  // Needed because: ensuring new pointers are copied to adjList of vertex u before adding new edges
+        }
+        else if(threadIdx.x == 0)
         {
             adjListSizes[u] = newSize;
         }
-        __syncwarp();  // Needed because: ensuring new pointers are copied before adding new edges
 
         int adjListIter = oldSize + threadIdx.x;
         int batchIter = start + threadIdx.x;
@@ -277,7 +282,7 @@ __global__ void relaxEdges(
 }
 
 /* Kernel to
-    ~> set distance of every vectex LLONG_MAX */
+   ~> set distance of every vectex LLONG_MAX */
 __global__ void initializeDistanceValues(
         const int                   numNodes,
         long long int* __restrict__ dist)
@@ -312,11 +317,10 @@ __global__ void computeIndices(
     int index = threadIdx.x + blockIdx.x * blockDim.x;
     while(__builtin_expect(index < batchSize, 1))
     {
-        atomicInc((unsigned int*)&batchOutDegree[sourceVertices[index]], UINT_MAX);
+        atomicInc((unsigned int*)&batchOutDegree[sourceVertices[index] + 1], UINT_MAX);
         index += blockDim.x * gridDim.x;
     }
 }
-
 
 /*
 GraphSSSP class
@@ -337,6 +341,7 @@ class GraphSSSP : private GraphAdjList
     // Auxillary data structures and storage
     int*           d_batchOutDegree;
     int*           d_tempStorage;
+    const size_t   tempStorageBytes = 1e5 * sizeof(int);
     bool*          d_relaxed;
     bool*          relaxed;
     bool*          d_flagA;
@@ -383,8 +388,8 @@ public:
         cudaMemcpy(negCycle, d_negCycle, sizeof(bool), cudaMemcpyDeviceToHost);
 
         // Allocating memory for auxillary data structures
-        cudaMalloc(&d_batchOutDegree, numNodes * sizeof(int));
-        cudaMalloc(&d_tempStorage, 1e5 * sizeof(int)); // allocating temporary storage which can be used in libraries
+        cudaMalloc(&d_batchOutDegree, (numNodes + 1) * sizeof(int));
+        cudaMalloc(&d_tempStorage, tempStorageBytes); // allocating temporary storage which can be used in libraries
         cudaMalloc(&d_relaxed, sizeof(bool));
         cudaMalloc(&d_flagA, numNodes * sizeof(bool));
         cudaMalloc(&d_flagB, numNodes * sizeof(bool));
@@ -441,13 +446,10 @@ public:
         cudaMemcpy(d_destinationVertices, destinationVertices, batchSize * sizeof(int), cudaMemcpyHostToDevice);
         cudaMemcpy(d_weights, weights, batchSize * sizeof(long long int), cudaMemcpyHostToDevice);
 
-        printf("samdeep 1, %d\n", *negCycle);
-
         startTime = rtClock();
         // Inserting batch of edges
         if(!(*negCycle))
         {
-            printf("ram ram\n");
             thrust::device_ptr <int> src_ptr(d_sourceVertices);
             thrust::device_ptr<int> dst_ptr(d_destinationVertices);
             thrust::device_ptr<long long int> wgt_ptr(d_weights);
@@ -458,24 +460,46 @@ public:
                 thrust::make_zip_iterator(
                     thrust::make_tuple(dst_ptr, wgt_ptr)));
             
-            cudaMemset(d_batchOutDegree, 0, numNodes * sizeof(int));
+            cudaMemset(d_batchOutDegree, 0, (numNodes + 1) * sizeof(int));
             
             computeIndices <<< GRID_SIZE, BLOCK_SIZE >>> (d_batchOutDegree, d_sourceVertices, batchSize);
             cudaDeviceSynchronize();
 
+            
+            // Performing prefix sum using thrust library
             thrust::device_ptr<int> batchOutDegree_ptr(d_batchOutDegree);
             thrust::inclusive_scan(batchOutDegree_ptr, batchOutDegree_ptr + numNodes + 1, batchOutDegree_ptr);
 
-            printf("completed prefix scan\n");
+            /*
+            // Doing prefix sum using CUB library
+            size_t required_temp_storage_bytes = 0;
+            cub::DeviceScan::InclusiveSum(
+                nullptr,
+                required_temp_storage_bytes,
+                d_batchOutDegree,
+                d_batchOutDegree,
+                numNodes + 1);
+            if(required_temp_storage_bytes > tempStorageBytes)
+            {
+                printf("Warning: temp storage too small! Required = %zu bytes, Actual = %zu\n", required_temp_storage_bytes, tempStorageBytes);
+                exit(EXIT_FAILURE);
+            }
+            cub::DeviceScan::InclusiveSum(
+                d_tempStorage,
+                required_temp_storage_bytes,
+                d_batchOutDegree,
+                d_batchOutDegree,
+                numNodes + 1);
+            */
 
             bool relaxed;
 
             cudaMemset(d_relaxed, false, sizeof(bool));
 
             // Insert batch of edges
-            dim3 blockSize(32, 16);
+            dim3 BLOCK_SIZE(32, 16);
             // Inside loop: One warp for each vertex, (one warp is benficial because in this case we are inserting a batch of edges and not adll edges at once, in a batch of size k there will be less number of edges adding to a single vertex than in the case where we are adding all edges at once. In static graph setting a block of 4 warps is dedicated to each vertex each time in loop.
-            insertBatchOfEdgesKernel <<<256, blockSize>>> (numNodes, d_destinationVertices, d_weights, d_batchOutDegree, d_adjListSizes, d_adjListCapacities, d_adjListDestinationVertices, d_adjListWeights, d_relaxed, d_flagA, d_dist);
+            insertBatchOfEdgesKernel <<< 256, BLOCK_SIZE >>> (numNodes, d_destinationVertices, d_weights, d_batchOutDegree, d_adjListSizes, d_adjListCapacities, d_adjListDestinationVertices, d_adjListWeights, d_relaxed, d_flagA, d_dist);
             
             cudaMemcpy(&relaxed, d_relaxed, sizeof(bool), cudaMemcpyDeviceToHost);
 
@@ -485,18 +509,36 @@ public:
             }
         }
         endTime = rtClock();
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            printf("CUDA Error: %s\n", cudaGetErrorString(err));
+            exit(EXIT_FAILURE);
+        }
 
         timeConsumed = (endTime - startTime) * 1e3;
 
         printf("-----BATCH INSERT-----\n");
         printf("batchSize,timeConsumed(ms)\n");
         printf("%d,%.6f\n", batchSize, timeConsumed);
+
+        cudaFree(d_sourceVertices);
+        cudaFree(d_destinationVertices);
+        cudaFree(d_weights);
+        free(sourceVertices);
+        free(destinationVertices);
+        free(weights);
     }
 
     void batchQuery(int batchSize, int* vertices)
     {
-        cudaMemcpy(dist, d_dist, numNodes * sizeof(long long int), cudaMemcpyDeviceToHost);
         printf("-----BATCH QUERY-----\n");
+        if(*negCycle)
+        {
+            printf("Negative-cycle detected!\n");
+            return;
+        }
+
+        cudaMemcpy(dist, d_dist, numNodes * sizeof(long long int), cudaMemcpyDeviceToHost);
         printf("vertex,shortest-distance\n");
         for(int k = 0; k < batchSize; k++)
         {
@@ -515,8 +557,14 @@ public:
 
     void batchQueryAllVertices()
     {
-        cudaMemcpy(dist, d_dist, numNodes * sizeof(long long int), cudaMemcpyDeviceToHost);
         printf("-----BATCH QUERY-----\n");
+        if(*negCycle)
+        {
+            printf("Negative-cycle detected!\n");
+            return;
+        }
+
+        cudaMemcpy(dist, d_dist, numNodes * sizeof(long long int), cudaMemcpyDeviceToHost);
         printf("vertex,shortest-distance\n");
         for(int u = 0; u < numNodes; u++)
         {
@@ -541,9 +589,12 @@ void solve(int numNodes, int sourceVertex, int numQueries, Queries* inputQueries
         {
             G->batchInsert(inputQueries[query].n, inputQueries[query].data.edgesToAdd);
         }
-        else
+        else if(inputQueries[query].n == -1)
         {
             G->batchQueryAllVertices();
+        }else
+        {
+            G->batchQuery(inputQueries[query].n, inputQueries[query].data.verticesToKnow);
         }
     }
 
