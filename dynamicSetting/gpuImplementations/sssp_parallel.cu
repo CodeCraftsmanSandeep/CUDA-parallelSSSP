@@ -135,20 +135,25 @@ public:
     }
 };
 
+
 /* Kernel to
     ~> Insert batch of edges into existing graph */
 __global__ void insertBatchOfEdgesKernel(
-        const int                           numNodes,
-        const int* __restrict__             batchDestinationVertices,
-        const long long int* __restrict__   batchWeights,
-        const int* __restrict__             batchPos,
+  		const int                           numNodes,
+  		// Adjacency list representation in AoS format
         int* __restrict__                   adjListSizes,
         int* __restrict__                   adjListCapacities,
         int** __restrict__                  adjListDestinationVertices,
         long long int** __restrict__        adjListWeights,
-        bool* __restrict__                  relaxed,
-        bool* __restrict__                  nextFlag, 
-        long long int* __restrict__         dist)
+  		// Batch of edges in CSR style
+        const int* __restrict__             batchPos,
+	    const int* __restrict__             batchDestinationVertices,
+        const long long int* __restrict__   batchWeights,
+  		// SSSP solution data structures
+        long long int* __restrict__         dist,
+	  	bool* __restrict__                  relaxed,
+  		// SSSP auxiliary data structures
+        bool* __restrict__                  nextFlag)
 {
     int u = threadIdx.y + blockIdx.x * blockDim.y;
     int v;
@@ -161,64 +166,78 @@ __global__ void insertBatchOfEdgesKernel(
         const int oldSize   = adjListSizes[u];
         const int newSize   = oldSize + reqSpace;
 
+        int* storageForDestinationVertices;
+        long long int* storageForWeights;
+
         if(newSize > adjListCapacities[u])
         {
-            int* newStorageForDestinationVertices;
-            long long int* newStorageForWeights;
             const int newCapacity = (newSize << 1);
 
             if(threadIdx.x == 0)
             {
-                // insert space in the adjacency list of vertex
-                newStorageForDestinationVertices = (int*)malloc(newCapacity * sizeof(int));
-                newStorageForWeights = (long long int*)malloc(newCapacity * sizeof(long long int));
+                // Allocate large memory for adjacency list of vertex u
+                storageForDestinationVertices = (int*)malloc(newCapacity * sizeof(int));
+                storageForWeights = (long long int*)malloc(newCapacity * sizeof(long long int));
             }
-            
-            // No __syncwarp() Needed because: __shfl_sync inherently synchronizes warp
-            // Broadcast the pointer from lane 0 to all lanes in the warp
-            newStorageForDestinationVertices = (int*)__shfl_sync(0xFFFFFFFF, (uintptr_t)newStorageForDestinationVertices, 0);
-            newStorageForWeights = (long long int*)__shfl_sync(0xFFFFFFFF, (uintptr_t)newStorageForWeights, 0);
 
-            if(newStorageForDestinationVertices == nullptr || newStorageForWeights == nullptr)
+            // Broadcast pointers from lane 0 to all lanes in the warp
+            storageForDestinationVertices =
+              		 (int*)__shfl_sync(0xFFFFFFFF, (uintptr_t)storageForDestinationVertices, 0);
+            storageForWeights =
+              		(long long int*)__shfl_sync(0xFFFFFFFF, (uintptr_t)storageForWeights, 0);
+
+            // Checking memory allocation
+            if(storageForDestinationVertices == nullptr || storageForWeights == nullptr)
             {
                 printf("Memory allocation failed\n");
                 continue;
             }
-            // Copy the previosuly present out neighbours to new storage
+
+            // Copy previosuly present out neighbours to new storage
             int iter = threadIdx.x;
             while(iter < adjListSizes[u])
             {
-                newStorageForDestinationVertices[iter] = adjListDestinationVertices[u][iter];
-                newStorageForWeights[iter] = adjListWeights[u][iter];
-
-                iter += 32;
+                storageForDestinationVertices[iter] = adjListDestinationVertices[u][iter];
+                storageForWeights[iter]      	    = adjListWeights[u][iter];
+              	iter += 32; // warp stride loop
             }
-            __syncwarp();  // Needed because: ensuring copying is completed by threads in warp before freeing the memory
+
+           	// Ensuring copying is completed by threads in warp before de allocating the memory
+            __syncwarp();
 
             if(threadIdx.x == 0)
             {
+                // Deallocating previous memory
                 free(adjListDestinationVertices[u]);
                 free(adjListWeights[u]);
 
-                adjListDestinationVertices[u] = newStorageForDestinationVertices;
-                adjListWeights[u] = newStorageForWeights;
-                
+                // Setting pointers in global memory
+                adjListDestinationVertices[u] = storageForDestinationVertices;
+                adjListWeights[u] 			  = storageForWeights;
+
+              	// Setting new size and capacity
                 adjListSizes[u] = newSize;
                 adjListCapacities[u] = newCapacity;
             }
-            __syncwarp();  // Needed because: ensuring new pointers are copied to adjList of vertex u before adding new edges
+
+          	// Needed because: ensuring new pointers are copied to adjList of vertex u before adding new edges
+            __syncwarp();
         }
-        else if(threadIdx.x == 0)
+        else
         {
+            // Setting new size
             adjListSizes[u] = newSize;
+            storageForDestinationVertices = adjListDestinationVertices[u];
+            storageForWeights             = adjListWeights[u];
         }
 
+        // Adding new edges from batch
         int adjListIter = oldSize + threadIdx.x;
         int batchIter = start + threadIdx.x;
         while(batchIter < end)
         {
-            v = adjListDestinationVertices[u][adjListIter] = batchDestinationVertices[batchIter];
-            w = adjListWeights[u][adjListIter] = batchWeights[batchIter];
+            v = storageForDestinationVertices[adjListIter] = batchDestinationVertices[batchIter];
+            w = storageForWeights[adjListIter]             = batchWeights[batchIter];
 
             if(dist[u] != LLONG_MAX){
                 distCandidate = dist[u] + w;
@@ -229,9 +248,10 @@ __global__ void insertBatchOfEdgesKernel(
                     nextFlag[v] = true;
                 }
             }
-            // warp-size: which is blockDim.x
-            batchIter   += 32; 
-            adjListIter += 32; 
+
+          	// warp-size: which is blockDim.x
+            batchIter   += 32;
+            adjListIter += 32;
         }
 
         u += blockDim.y * gridDim.x;
@@ -499,8 +519,18 @@ public:
             // Insert batch of edges
             dim3 BLOCK_SIZE(32, 16);
             // Inside loop: One warp for each vertex, (one warp is benficial because in this case we are inserting a batch of edges and not adll edges at once, in a batch of size k there will be less number of edges adding to a single vertex than in the case where we are adding all edges at once. In static graph setting a block of 4 warps is dedicated to each vertex each time in loop.
-            insertBatchOfEdgesKernel <<< 256, BLOCK_SIZE >>> (numNodes, d_destinationVertices, d_weights, d_batchOutDegree, d_adjListSizes, d_adjListCapacities, d_adjListDestinationVertices, d_adjListWeights, d_relaxed, d_flagA, d_dist);
-            
+            insertBatchOfEdgesKernel <<< 256, BLOCK_SIZE >>> 
+                            (numNodes, 
+                            d_adjListSizes, 
+                            d_adjListCapacities, 
+                            d_adjListDestinationVertices,
+                            d_adjListWeights, 
+                            d_batchOutDegree,
+                            d_destinationVertices, 
+                            d_weights, 
+                            d_dist,
+                            d_relaxed, 
+                            d_flagA);
             cudaMemcpy(&relaxed, d_relaxed, sizeof(bool), cudaMemcpyDeviceToHost);
 
             if(relaxed)
