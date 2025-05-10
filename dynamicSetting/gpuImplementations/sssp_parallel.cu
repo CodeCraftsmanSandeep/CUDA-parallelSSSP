@@ -249,7 +249,7 @@ __global__ void insertBatchOfEdgesKernel(
                 }
             }
 
-          	// warp-size: which is blockDim.x
+            // warp-size: which is blockDim.x
             batchIter   += 32;
             adjListIter += 32;
         }
