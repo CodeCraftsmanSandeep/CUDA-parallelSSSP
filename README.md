@@ -1,30 +1,58 @@
 # CUDA-parallelSSSP
 
-This project implements a **Single-Source Shortest Path (SSSP)** algorithm using **CUDA** to parallelize the process and accelerate performance. The goal is to efficiently compute the shortest paths from a source node to all other nodes in a graph, utilizing the power of GPUs to handle large-scale graph data.
+This project implements the **Single-Source Shortest Path (SSSP)** algorithm using CUDA, with both static and dynamic settings for efficient parallel computation on GPUs. It demonstrates the power of CUDA for accelerating graph algorithms.
 
-## Features
+---
 
-- **Parallelization**: The algorithm is parallelized using CUDA, enabling faster processing of large graphs.
-- **Optimized Data Structures**: Efficient data structures are used to represent the graph and store distances.
-- **Graph Representation**: The graph is represented as an adjacency list, allowing for efficient traversal.
-- **CUDA Kernels**: Custom CUDA kernels are implemented for key steps in the algorithm.
+## 🚀 Features
 
-## Requirements
+* **Multiple Implementations**:
 
-- **CUDA**: Ensure you have a CUDA-capable GPU and the CUDA toolkit installed.
-- **C++ Compiler**: A C++ compiler compatible with CUDA.
-- **Make**: Used for building the project.
-- **Linux/MacOS**: The project is primarily tested on Linux and MacOS environments.
+  * CPU (Sequential, Optimized)
+  * GPU (Basic Parallel, Optimized)
+* **Static and Dynamic Settings**:
 
-### System Requirements
+  * Static Setting: Fixed settings for optimized performance.
+  * Dynamic Setting: Customizable settings for experimentation.
+* **Flag Optimization**:
 
-- CUDA version: 7.0 or later
-- GPU with at least 1 GB of memory (recommended)
-- GCC version 7 or higher (for Linux) or Clang (for MacOS)
+  * Specialized GPU implementations with flag-based optimizations for faster convergence.
 
-## Installation
+---
 
-1. Clone the repository:
+## 📁 Project Structure
+
+```
+CUDA-parallelSSSP/
+├── dynamicSetting/
+│   └── gpuImplementations/
+│       ├── sssp_parallel.cu
+│       └── src.cu
+├── staticSetting/
+│   ├── cpuImplementations/
+│   │   ├── sssp_sequential.cu
+│   │   ├── sssp_sequential_flags.cu
+│   │   └── sssp_sequential_flags_optimized.cu
+│   └── gpuImplementations/
+│       ├── sssp_parallel.cu
+│       ├── sssp_parallel_flags.cu
+│       ├── sssp_parallel_flags_optimized_version1.cu
+│       ├── sssp_parallel_flags_optimized_version2.cu
+│       └── sssp_parallel_flags_optimized_version3.cu
+├── LICENSE
+└── README.md
+```
+
+* **dynamicSetting/**: Contains GPU implementations with flexible configurations.
+* **staticSetting/**: Contains both CPU and GPU implementations with predefined settings.
+
+---
+
+## 🛠️ Building the Project
+
+1. **Clone the Repository**:
 
    ```bash
-   git clone https://github.com/yourusername/CUDA-parallelSSSP.git
+   git clone https://github.com/CodeCraftsmanSandeep/CUDA-parallelSSSP.git
+   cd CUDA-parallelSSSP
+   ```
