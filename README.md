@@ -28,4 +28,3 @@ This project implements a **Single-Source Shortest Path (SSSP)** algorithm using
 
    ```bash
    git clone https://github.com/yourusername/CUDA-parallelSSSP.git
-   cd CUDA-parallelSSSP
