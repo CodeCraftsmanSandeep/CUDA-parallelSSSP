@@ -18,7 +18,7 @@ This project implements a **Single-Source Shortest Path (SSSP)** algorithm using
 
 ### System Requirements
 
-- CUDA version: 11.0 or later
+- CUDA version: 7.0 or later
 - GPU with at least 1 GB of memory (recommended)
 - GCC version 7 or higher (for Linux) or Clang (for MacOS)
 
